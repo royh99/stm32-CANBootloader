@@ -18,16 +18,15 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <stdint.h>
+#include <cstddef>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
-#include <libopencm3/stm32/can.h>
+#include <libopencm3/stm32/fdcan.h>
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/iwdg.h>
 #include <libopencm3/stm32/desig.h>
 #include <libopencm3/stm32/crc.h>
-#include <libopencm3/stm32/iwdg.h>
-#include <libopencm3/stm32/exti.h>
 #include <libopencm3/stm32/desig.h>
 #include <libopencm3/cm3/scb.h>
 #include "hwinit.h"
@@ -35,7 +34,7 @@
 #define FLASH_START         0x08000000
 #define SMALLEST_PAGE_WORDS 256
 #define PROGRAM_WORDS       256
-#define APP_FLASH_START     0x08001000
+#define APP_FLASH_START     0x08008000 // this allows for 96K in 128K block 1
 #define BOOTLOADER_MAGIC    0xAA
 #define DELAY_100           (1 << 17)
 #define NODECANID           0x7DE
@@ -50,51 +49,39 @@ static volatile states state = MAGIC;
 static uint32_t page_buffer[PROGRAM_WORDS];
 static bool usartUpdate = false;
 
-//Check 1k of flash whether it contains only 0xFF = erased
-static bool check_erased(uint32_t* baseAddress)
-{
-   uint32_t check = 0xFFFFFFFF;
-
-   for (int i = 0; i < SMALLEST_PAGE_WORDS; i++, baseAddress++)
-      check &= *baseAddress;
-
-   return check == 0xFFFFFFFF;
-}
-
-//If the device has 2k pages we must only call flash_erase_page()
-//on every other call of write_flash().
-//Therefor we check if the the flash region we attempt to write
-//is already erased (in case of 2k pages) or not (1k pages)
 static void write_flash(uint32_t addr, uint32_t *pageBuffer)
 {
-   if (!check_erased((uint32_t*)addr))
-      flash_erase_page(addr);
-
-   for (uint32_t idx = 0; idx < PROGRAM_WORDS; idx++)
-   {
-      flash_program_word(addr + idx * 4, pageBuffer[idx]);
-   }
+   flash_program(addr, (uint8_t*)pageBuffer, PROGRAM_WORDS*2); // length is in bytes (multiple of 8)                                                                                                
 }
 
 static void send_byte(uint8_t b)
 {
-   can_transmit(CAN1, NODECANID, false, false, 1, &b);
+   fdcan_transmit(CAN1, NODECANID, false, false, false, false, 1,  &b);
    if (usartUpdate) usart_send_blocking(USART3, b);
 }
 
 static void send_can_hello()
 {
    uint32_t data[] = { '3' | ('1' << 8),  DESIG_UNIQUE_ID2 };
-   can_transmit(CAN1, NODECANID, false, false, 8, (uint8_t*)data);
+   fdcan_transmit(CAN1, NODECANID, false, false, false, false, 8, (uint8_t*)data);
 }
 
 static bool can_recv(uint8_t* data, uint8_t& len)
 {
    uint32_t id;
    bool ext, rtr;
-   uint8_t fmi;
-
-   return can_receive(CAN1, 0, true, &id, &ext, &rtr, &fmi, &len, data, 0) > 0;
+   uint8_t length, fmi;
+   uint8_t fifo = 0;
+   
+   if (FDCAN_IR(CAN1) & (FDCAN_IR_RF0N)) fifo = 0;
+   if (FDCAN_IR(CAN1) & (FDCAN_IR_RF1N)) fifo = 1;
+   
+   while (fdcan_available_rx(CAN1, fifo)) 
+   {
+	  fdcan_receive(CAN1, fifo, true, &id, &ext, &rtr, &fmi, &length, (uint8_t*)data, NULL);
+   }
+   FDCAN_IR(CAN1) |= ( FDCAN_IR_RF0N | FDCAN_IR_RF1N); // set flags to "1" to clear them!
+   return 1;
 }
 
 static void wait()
@@ -108,7 +95,7 @@ extern "C" int main(void)
    uint32_t addr = APP_FLASH_START;
 
    clock_setup();
-   initialize_pins();
+   //initialize_pins();
    can_setup(MASTERCANID);
    usart_setup();
 
@@ -173,6 +160,16 @@ static void handle_data(uint8_t* data, uint8_t)
       break;
    case PAGECOUNT:
       numPages = data[0];
+	  if (numPages > 0)
+		{
+		flash_unlock();
+		// calc start page and erase 2K pages based on numPages of 1K pages
+		for (uint8_t page = ((APP_FLASH_START-FLASH_START)/2048); page < ((numPages+1)/2)+((APP_FLASH_START-FLASH_START)/2048); page++)
+      {  
+         flash_clear_status_flags();
+		   flash_erase_page(page); // erase 2K pages based on numPages of 1K pages
+         }
+      }
       state = PAGE;
       currentWord = 0;
       send_byte('P');
@@ -226,7 +223,7 @@ static void handle_data(uint8_t* data, uint8_t)
 }
 
 /* Interrupt service routines */
-extern "C" void usb_lp_can_rx0_isr()
+extern "C" void fdcan1_intr0_isr()
 {
    uint8_t canData[8], len;
 

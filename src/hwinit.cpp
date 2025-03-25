@@ -66,7 +66,7 @@ void clock_setup()
    rcc_wait_for_osc_ready(RCC_LSI);
    iwdg_set_period_ms(2000);
    iwdg_start();
-} 
+}
 
 void clock_teardown()
 {

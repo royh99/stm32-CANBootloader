@@ -27,7 +27,7 @@ extern "C"
 #endif
 
 #define PINDEF_BLKNUM    3  //3rd to last flash page
-#define PINDEF_BLKSIZE   1024
+#define PINDEF_BLKSIZE   2048
 #define NUM_PIN_COMMANDS 10
 #define PIN_IN 0
 #define PIN_OUT 1

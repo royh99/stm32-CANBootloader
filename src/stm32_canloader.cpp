@@ -223,7 +223,7 @@ static void handle_data(uint8_t* data, uint8_t)
 }
 
 /* Interrupt service routines */
-extern "C" void fdcan1_intr0_isr()
+extern "C" void fdcan1_it0_isr()
 {
    uint8_t canData[8], len;
 
